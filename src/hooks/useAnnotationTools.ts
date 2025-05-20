@@ -1,4 +1,3 @@
-// hooks/useAnnotationTools.ts
 import { useCallback, useState } from 'react';
 import type {
   Point,
@@ -19,6 +18,7 @@ interface State {
   start: Point | null;
   selected: Annotation | null;
   offset: Point;
+  tempMoved: Annotation | null;
 }
 
 export function useAnnotationTools(
@@ -27,24 +27,23 @@ export function useAnnotationTools(
   color: string,
   lineWidth: number,
 ) {
-  const { annotations, push, undo, redo ,reset} = useAnnotationHistory();
+  const { annotations, push, undo, redo, reset } = useAnnotationHistory();
   const [state, setState] = useState<State>({
     isDrawing: false,
     points: [],
     start: null,
     selected: null,
-    offset: { x: 0, y: 0 }
+    offset: { x: 0, y: 0 },
+    tempMoved: null
   });
 
   const replaceAnnotations = (newAnnotations: Annotation[]) => {
-  reset(newAnnotations);
-  
-  // Add null check and type assertion
-  const ctx = annotCanvasRef.current?.getContext('2d');
-  if (ctx) {
-    redrawAll(ctx, newAnnotations);
-  }
-};
+    reset(newAnnotations);
+    const ctx = annotCanvasRef.current?.getContext('2d');
+    if (ctx) {
+      redrawAll(ctx, newAnnotations);
+    }
+  };
 
   const getPos = (e: React.MouseEvent): Point => {
     const r = annotCanvasRef.current!.getBoundingClientRect();
@@ -71,7 +70,8 @@ export function useAnnotationTools(
           ...s,
           selected: hit,
           isDrawing: true,
-          offset: { x: pt.x - ref.x, y: pt.y - ref.y }
+          offset: { x: pt.x - ref.x, y: pt.y - ref.y },
+          tempMoved: null
         }));
         return;
       }
@@ -92,8 +92,9 @@ export function useAnnotationTools(
     if (!ctx) return;
 
     const pt = getPos(e);
-    const { isDrawing, selected, offset } = state;
+    const { isDrawing, selected, offset, start, points } = state;
 
+    // Handle moving annotation
     if (tool === 'move' && isDrawing && selected) {
       const dx = pt.x - offset.x;
       const dy = pt.y - offset.y;
@@ -104,7 +105,7 @@ export function useAnnotationTools(
         moved = {
           ...r,
           start: { x: dx, y: dy },
-          end:   { x: dx + (r.end.x - r.start.x), y: dy + (r.end.y - r.start.y) }
+          end: { x: dx + (r.end.x - r.start.x), y: dy + (r.end.y - r.start.y) }
         };
       } else if (selected.type === 'circle') {
         const c = selected as CircleAnnotation;
@@ -114,27 +115,48 @@ export function useAnnotationTools(
         moved = {
           ...a,
           start: { x: dx, y: dy },
-          end:   { x: dx + (a.end.x - a.start.x), y: dy + (a.end.y - a.start.y) }
+          end: { x: dx + (a.end.x - a.start.x), y: dy + (a.end.y - a.start.y) }
         };
       }
 
       if (moved) {
-        push(moved);
-        redrawAnnotations();
+        setState(s => ({ ...s, tempMoved: moved }));
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        redrawAll(ctx, annotations, moved);
       }
       return;
     }
 
-    if (!isDrawing || !state.start) return;
+    // Handle drawing preview
+    if (!isDrawing || !start) return;
 
     setState(s => ({ ...s, points: [...s.points, pt] }));
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     redrawAll(ctx, annotations, state.selected || undefined);
-    drawPreview(ctx, tool, color, lineWidth, state.start, state.points, pt);
-  }, [state, tool, color, lineWidth, annotations, push]);
+    drawPreview(ctx, tool, color, lineWidth, start, points, pt);
+  }, [state, tool, color, lineWidth, annotations]);
 
   const onMouseUp = useCallback(() => {
-    const { isDrawing, start, points } = state;
+    const { isDrawing, start, points, selected, tempMoved } = state;
+
+    // Finalize move and remove old
+    if (tool === 'move' && isDrawing && selected && tempMoved) {
+      // Replace the moved annotation, removing the old copy
+      const updated = annotations.map(a => 
+        a.id === selected.id ? (tempMoved as Annotation) : a
+      );
+      replaceAnnotations(updated);
+
+      setState(s => ({
+        ...s,
+        isDrawing: false,
+        selected: null,
+        tempMoved: null
+      }));
+      return;
+    }
+
+    // Cancel if not drawing
     if (!isDrawing || !start) {
       setState(s => ({ ...s, isDrawing: false }));
       return;
@@ -152,13 +174,11 @@ export function useAnnotationTools(
       const pen: PenAnnotation = { ...base, type: 'pen', points };
       push(pen);
     }
-
     if (tool === 'rect') {
       const end = points[points.length - 1];
       const rect: RectAnnotation = { ...base, type: 'rect', start, end };
       push(rect);
     }
-
     if (tool === 'circle') {
       const end = points[points.length - 1];
       const dx = end.x - start.x, dy = end.y - start.y;
@@ -170,7 +190,6 @@ export function useAnnotationTools(
       };
       push(circle);
     }
-
     if (tool === 'arrow') {
       const end = points[points.length - 1];
       const arrow: ArrowAnnotation = { ...base, type: 'arrow', start, end };
@@ -180,7 +199,7 @@ export function useAnnotationTools(
     setState(s => ({ ...s, isDrawing: false, start: null, points: [] }));
     const ctx = annotCanvasRef.current!.getContext('2d')!;
     redrawAll(ctx, annotations, state.selected || undefined);
-  }, [state, tool, color, lineWidth, push, annotations]);
+  }, [state, tool, color, lineWidth, push, annotations, replaceAnnotations]);
 
   return {
     annotations,
